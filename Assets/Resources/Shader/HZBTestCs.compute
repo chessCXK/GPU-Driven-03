@@ -1,0 +1,181 @@
+#pragma multi_compile_local __ _BAKEDCODE
+
+#pragma multi_compile_local __ _ENABLENORMAL
+
+#pragma multi_compile_local __ _ENABLECLUSTER
+
+#pragma kernel HZBTest
+#pragma kernel ClearArgs
+
+#pragma kernel ClusterTest
+#pragma kernel TriangleTest
+
+#pragma kernel ClearClusterData
+#pragma kernel ClearClusterChunkData
+
+#pragma kernel BakedClearArgs
+
+#include "Common.cginc"
+#include "HZBOclussion.cginc"
+#include "ShadowCull.cginc"
+
+#ifdef _BAKEDCODE
+RWBuffer<uint> _VisibleArgsIndexBuffer;
+#endif
+StructuredBuffer<InstanceData> _InstanceDataBuffer;
+StructuredBuffer<InstanceKindData> _InstanceDataKindBuffer;
+RWBuffer<uint> _ArgsBuffer;
+RWBuffer<uint> _ResultBuffer;
+
+//Cluster
+StructuredBuffer<InstanceBuffer> _InstanceBuffer;
+StructuredBuffer<ClusterData> _ClusterDataBuffer;
+StructuredBuffer<ClusterChunkLODData> _ClusterChunkLODDataBuffer;
+RWBuffer <uint4> _ClusterViewBuffer;//x: visible, y:lodIndex, z:argsIndex
+RWBuffer <uint4> _ClusterChunkDataBuffer;//x: visible, y:clusterDataIndex,z:instanceIndex
+
+StructuredBuffer<VertexBuffer> _ClusterVertexData;
+Buffer<uint> _ClusterTriangleData;
+RWBuffer<uint2> _ResultTriange;//x:_ClusterTriangleData is triangle first index, y:_InstanceBuffer indexs
+
+float4 _FrustumPlanes[6];
+
+//x:fieldOfView, y:LODBias, z:maxmumLODLevel
+half4 _CameraData;
+//xyz:cameraPos
+half3 _CameraPos;
+
+uint _MaxSize;
+
+#include "ClusterCull.cginc"
+
+[numthreads(64,1,1)]
+void HZBTest(uint id : SV_DispatchThreadID)
+{
+    if (id >= _MaxSize)
+    {
+        return;
+    }
+
+    InstanceData iData = _InstanceDataBuffer[id];
+    InstanceKindData iKindData = _InstanceDataKindBuffer[iData.instanceKindIndex];
+
+    //LOD
+    half maxExtend = max(iData.extends.x, max(iData.extends.y, iData.extends.z));
+    uint lodLevel = CalculateLODLevel(iKindData.lodRelative, iData.center, maxExtend * 2, _CameraPos, _CameraData.x, _CameraData.y);
+    if (lodLevel < _CameraData.z)
+    {
+        lodLevel = _CameraData.z;
+    }
+    if (iKindData.lodNum <= lodLevel)
+    {
+        return;
+    }
+    
+#if !defined(_BAKEDCODE)
+    #if defined(_CSM0) || defined(_CSM1) || defined(_CSM2)
+        //shadow
+        ShadowCull(iKindData, iData);
+    #endif
+#endif
+
+    if (FrustumCull(iData.center, iData.extends, _FrustumPlanes) > 0.5)
+    {
+        return;
+    }
+    
+    if (HizCull_4x4(iData.center, iData.extends) > 0.5)
+    {
+        return;
+    }
+
+#ifdef _ENABLECLUSTER
+    //lodLevel = 0;
+    if (iData.clusterIndex > 0)
+    {
+        //Cluster
+        _ClusterViewBuffer[iData.clusterIndex - 1] = uint4(1, lodLevel, iKindData.argsIndex, iData.clusterIndex);
+        return;
+    }
+#endif
+
+#ifdef _ENABLENORMAL
+    uint argsIndex = iKindData.argsIndex + lodLevel;
+    uint lodOffset = lodLevel * iKindData.elementNum;
+
+    uint currentIndex;
+
+    InterlockedAdd(_ArgsBuffer[argsIndex * 5 + 1], 1, currentIndex);
+    _ResultBuffer[iKindData.kindResultStart + lodOffset + currentIndex] = iData.instanceIndex;
+#endif
+
+#ifdef _BAKEDCODE
+    //TODO
+    //_VisibleArgsIndexBuffer[argsIndex] = iData.instanceKindIndex * 100 + lodLevel + 1;
+#endif
+}
+
+[numthreads(64, 1, 1)]
+void ClearArgs(uint id : SV_DispatchThreadID)
+{
+    if(id >= _MaxSize)
+    {
+        return;
+    }
+    _ArgsBuffer[id * 5 + 1] = 0;
+
+#if !defined(_BAKEDCODE)
+    #if defined(_CSM0) || defined(_CSM1) || defined(_CSM2)
+
+        //shadow
+        ClearShadowArgs(id);
+    #endif
+#endif
+}
+
+//Begin Cluster
+[numthreads(64, 1, 1)]
+void ClusterTest(uint2 id : SV_DispatchThreadID)
+{
+    ClusterCull(id);
+}
+
+[numthreads(64, 1, 1)]
+void TriangleTest(uint2 id: SV_DispatchThreadID)
+{
+    TriangleCull(id);
+}
+
+[numthreads(64, 1, 1)]
+void ClearClusterData(uint id: SV_DispatchThreadID)
+{
+    if (id >= _MaxSize)
+    {
+        return;
+    }
+    _ClusterViewBuffer[id] = uint4(0, 0, 0, 0);
+}
+
+[numthreads(64, 1, 1)]
+void ClearClusterChunkData(uint id: SV_DispatchThreadID)
+{
+    if (id >= _MaxSize)
+    {
+        return;
+    }
+    _ClusterChunkDataBuffer[id] = uint4(0, 0, 0, 0);
+}
+//End Cluster
+
+[numthreads(64, 1, 1)]
+void BakedClearArgs(uint id : SV_DispatchThreadID)
+{
+#ifdef _BAKEDCODE
+    if (id >= _MaxSize)
+    {
+        return;
+    }
+    _VisibleArgsIndexBuffer[id] = 0;
+#endif
+}
+
